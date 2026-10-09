@@ -9,8 +9,6 @@ class PipelineStatus(str, Enum):
     PROMPT_REFINED = "PROMPT_REFINED"
     GENERATING_IMAGES = "GENERATING_IMAGES"
     IMAGES_READY = "IMAGES_READY"
-    GENERATING_VIDEO = "GENERATING_VIDEO"
-    VIDEO_READY = "VIDEO_READY"
     FAILED = "FAILED"
 
 
@@ -21,7 +19,7 @@ class PipelineStatus(str, Enum):
 class ImageModel(str, Enum):
     # ── Gemini API (GEMINI_API_KEY) ─────────────────────────────────
     GEMINI_IMAGEN3 = "gemini_imagen3"
-    # → gemini-3.1-flash-image — current flagship image model
+    # → gemini-3.1-flash-image — flagship image model (via generate_content)
 
     GEMINI_IMAGEN3_FAST = "gemini_imagen3_fast"
     # → gemini-3.1-flash-lite-image — ~2× faster, lighter
@@ -37,20 +35,6 @@ class ImageModel(str, Enum):
     # → Mystic endpoint, style=digital-art — illustrated / stylised output
 
 
-# ── Video Models ──────────────────────────────────────────────────────────────
-
-class VideoModel(str, Enum):
-    # ── Gemini API (GEMINI_API_KEY) ─────────────────────────────────
-    GEMINI_VEO2 = "gemini_veo2"
-    # → veo-3.1-generate-preview — cinematic quality, 5s
-
-    GEMINI_VEO2_FAST = "gemini_veo2_fast"
-    # → veo-3.1-fast-generate-preview — faster render
-
-    # ── Freepik API (FREEPIK_API_KEY) ─────────────────────────────────
-    FREEPIK_VIDEO = "freepik_video"
-    # → /v1/ai/video — image-to-video, 5s, 720p
-
 
 # ── Request Schemas ───────────────────────────────────────────────────────────
 
@@ -61,27 +45,24 @@ class CreateProjectRequest(BaseModel):
 
 class RefinePromptRequest(BaseModel):
     regenerate: bool = False  # True → use alternate Gemini system prompt
-    gemini_model: str = "gemini-3.8-flash"  # which Gemini text model to use
+    gemini_model: str = "gemini-3-flash-preview"  # which Gemini text model to use
 
 
 # ── Available Gemini text models (for frontend dropdown) ──────────────────────
 GEMINI_TEXT_MODELS = [
-    {"id": "gemini-3.8-flash",      "label": "Gemini 3.8 Flash",      "description": "Latest & fastest — recommended"},
-    {"id": "gemini-3.5-flash",      "label": "Gemini 3.5 Flash",      "description": "Stable, proven for creative tasks"},
-    {"id": "gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash Lite", "description": "Most cost-efficient, high volume"},
-    {"id": "gemini-3.1-pro",        "label": "Gemini 3.1 Pro",        "description": "Highest quality, slower (paid tier)"},
+    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash",        "description": "Latest & fastest — recommended"},
+    {"id": "gemini-2.5-flash",       "label": "Gemini 2.5 Flash",      "description": "Stable, proven for creative tasks"},
+    {"id": "gemini-3.1-flash-lite",  "label": "Gemini 3.1 Flash Lite", "description": "Most cost-efficient, high volume"},
+    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro",        "description": "Highest quality, slower (paid tier)"},
 ]
 
 
 class GenerateImagesRequest(BaseModel):
     model: ImageModel = ImageModel.GEMINI_IMAGEN3  # default: gemini-3.1-flash-image
     prompt: Optional[str] = None                   # override stored refined_prompt
+    aspect_ratio: str = "16:9"                     # e.g. "16:9", "9:16", "1:1", "4:3", "3:4"
 
 
-class SynthesizeVideoRequest(BaseModel):
-    model: VideoModel = VideoModel.GEMINI_VEO2  # default: veo-3.1-generate-preview
-    image_url: str
-    prompt: Optional[str] = None
 
 
 class SelectImageRequest(BaseModel):
@@ -97,9 +78,9 @@ class ProjectResponse(BaseModel):
     refined_prompt: Optional[str] = None
     image_urls: List[str] = []
     selected_image_url: Optional[str] = None
-    final_video_url: Optional[str] = None
     status: PipelineStatus
     task_id: Optional[str] = None
+    user_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -110,11 +91,64 @@ class ProjectStatusResponse(BaseModel):
     task_id: Optional[str] = None
     image_urls: List[str] = []
     selected_image_url: Optional[str] = None
-    final_video_url: Optional[str] = None
 
 
 class RefinePromptResponse(BaseModel):
     project_id: str
     original_prompt: str
     refined_prompt: str
+    image_prompt: str = ""   # focused visual description → image model
     status: PipelineStatus
+
+
+# ── Chat Studio Schemas ───────────────────────────────────────────────────────
+
+class MessageStatus(str, Enum):
+    COMPLETED = "COMPLETED"
+    PENDING = "PENDING"
+    FAILED = "FAILED"
+
+
+class MessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class ActionType(str, Enum):
+    CREATE_IMAGE = "create_image"
+    REFINE_PROMPT = "refine_prompt"
+
+
+class CreateSessionRequest(BaseModel):
+    title: str = "New Conversation"
+
+
+class SessionResponse(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SendMessageRequest(BaseModel):
+    content: str
+    action: Optional[ActionType] = None
+    model: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+
+
+class MessageResponse(BaseModel):
+    id: str
+    session_id: str
+    role: MessageRole
+    content: str
+    action: Optional[str] = None
+    model: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    image_urls: List[str] = []
+    status: MessageStatus
+    task_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime

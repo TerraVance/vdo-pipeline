@@ -126,8 +126,8 @@ vdo-pipeline/
 |---|---|---|
 | 6.1 | Build service layer abstraction | `ImageGenerationService` with a common interface for all providers |
 | 6.2 | Integrate Gemini Image | Gemini API image generation endpoint |
-| 6.3 | Integrate Google Flow | Google Flow API integration |
-| 6.4 | Integrate Nano Banana Pro / 2 | Nano Banana API integration |
+| 6.3 | Ensure Gemini Quota tracking | Track RESOURCE_EXHAUSTED cooldowns |
+| 6.4 | Set up fallback to Freepik | Auto-divert when Gemini hits limits |
 | 6.5 | Integrate Freepik Magnific | Freepik image API integration |
 | 6.6 | Create Celery image task | Worker calls selected provider, downloads images, uploads to Supabase Storage |
 | 6.7 | `POST /api/v1/projects/{id}/generate-images` | Accepts `model` choice, enqueues task, returns `202` |
@@ -145,9 +145,7 @@ class ImageProvider(ABC):
         pass
 
 class GeminiImageProvider(ImageProvider): ...
-class GoogleFlowProvider(ImageProvider): ...
-class NanaBananaProvider(ImageProvider): ...
-class FreepikMagnificProvider(ImageProvider): ...
+class FreepikMysticProvider(ImageProvider): ...
 ```
 
 **Deliverable:** API call with any model choice → 2-4 images stored in Supabase → URLs returned.
@@ -228,7 +226,7 @@ class FreepikMagnificProvider(ImageProvider): ...
 
 | # | Task | Details |
 |---|---|---|
-| 11.1 | Model selector dropdown | Choose between Google Flow, Nano Banana Pro, Nano Banana 2, Gemini, Freepik |
+| 11.1 | Model selector dropdown | Choose between Freepik Mystic Photo/Art and Gemini Imagen models |
 | 11.2 | "Generate Images" trigger | Calls `POST /generate-images`, starts polling |
 | 11.3 | Polling hook | `useQuery` with 3-5s refetch interval checking `GET /projects/{id}/status` |
 | 11.4 | 2x2 image grid | Display 4 candidate images with hover zoom effect |

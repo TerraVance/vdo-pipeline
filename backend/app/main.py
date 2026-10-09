@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import projects, prompt, images, video
+from app.api import projects, prompt, images, chat
 from app.core.database import get_supabase
 
 app = FastAPI(
@@ -25,7 +25,9 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(prompt.router)
 app.include_router(images.router)
-app.include_router(video.router)
+
+app.include_router(chat.router)
+
 
 
 # ── Health checks ────────────────────────────────────────────────────

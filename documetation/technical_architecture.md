@@ -94,9 +94,10 @@ graph TD
 
 ### Third-Party AI Services
 *   **LLM (Text)**: Google Gemini API
-*   **Image Generation**: Google Flow, Nano Banana Pro, Nano Banana 2, Gemini, Freepik Magnific
-*   **Video Generation**: Kling 2.5, Minimax Hailuo Fast 2.3 Fast, Gemini, Freepik (720p)
+*   **Image Generation**: Google Gemini (via `generate_content` with `IMAGE` modality), Freepik API (Mystic)
+*   **Video Generation**: Google Gemini (Veo 3.1, Veo 3.1 Lite), Freepik API (Kling / Minimax)
 
+*Note: The backend implements smart Quota Exhaustion Tracking for Gemini API. If a `429 RESOURCE_EXHAUSTED` error is hit, the provider is temporarily disabled for the specified cooldown period, and the system automatically falls back to Freepik or propagates an honest failure to the UI.*
 ---
 
 ## 3. Database Schema (Supabase PostgreSQL)
@@ -110,9 +111,12 @@ We need a primary table to track the state of a video generation session.
 | `user_id` | UUID (FK) | (Optional) Link to authenticated user |
 | `raw_prompt` | TEXT | The initial idea from Step 1 |
 | `style_tags` | JSONB | Array of selected styles (e.g., `["Cyberpunk", "Neon"]`) |
-| `refined_prompt` | TEXT | The output from Gemini (Step 2) |
-| `image_urls` | JSONB | Array of URLs for the 4 generated candidate images (Step 3) |
-| `selected_image_url` | TEXT | The specific image chosen by the user |
+| `refined_prompt` | TEXT | Full cinematic script from Gemini (Step 2) |
+| `image_prompt` | TEXT | Focused visual description for image models |
+| `motion_prompt` | TEXT | Specific movement directive for video models |
+| `image_urls` | JSONB | Array of URLs for the generated candidate images (Step 3) |
+| `selected_image_url` | TEXT | The single image chosen by the user (legacy single-scene) |
+| `selected_image_urls`| JSONB | Array of images chosen for multi-scene video |
 | `final_video_url` | TEXT | URL to the generated MP4 file (Step 4) |
 | `status` | ENUM | Current pipeline state (see below) |
 | `task_id` | VARCHAR | ID of the current Celery task (for background tracking) |
@@ -134,19 +138,19 @@ We need a primary table to track the state of a video generation session.
 
 ### A. Prompt Refinement (Synchronous)
 *   **POST** `/api/v1/projects/{project_id}/refine-prompt`
-*   **Payload**: `{ "raw_prompt": "string", "styles": ["string"] }`
-*   **Action**: Calls Gemini API synchronously. Updates `projects` row with `refined_prompt`.
-*   **Response**: Returns the refined text. (< 2 seconds)
+*   **Payload**: `{ "regenerate": bool, "gemini_model": "string" }`
+*   **Action**: Calls Gemini API synchronously with an advanced prompt engineer system prompt.
+*   **Response**: Returns `{ "refined_prompt": "...", "image_prompt": "...", "motion_prompt": "..." }`. (< 2 seconds)
 
 ### B. Image Generation (Asynchronous)
 *   **POST** `/api/v1/projects/{project_id}/generate-images`
-*   **Payload**: `{ "model": "google_flow", "prompt": "string" }`
+*   **Payload**: `{ "model": "gemini_imagen3", "prompt": "string" }`
 *   **Action**: Enqueues a Celery task. Updates status to `GENERATING_IMAGES`.
 *   **Response**: `202 Accepted` with `task_id`.
 
 ### C. Video Synthesis (Asynchronous)
 *   **POST** `/api/v1/projects/{project_id}/synthesize-video`
-*   **Payload**: `{ "model": "kling_2_5", "image_url": "string", "prompt": "string" }`
+*   **Payload**: `{ "model": "gemini_veo2", "image_url": "string", "prompt": "string" }`
 *   **Action**: Enqueues a Celery task. Updates status to `GENERATING_VIDEO`.
 *   **Response**: `202 Accepted` with `task_id`.
 
@@ -179,15 +183,10 @@ Since Image and Video APIs can take anywhere from 5 to 120 seconds, we cannot ho
 ## 6. Security & Environment Variables
 
 **Required Environment Variables:**
-*   **Supabase**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
-*   **Database**: `DATABASE_URL` (Direct connection string for Celery/FastAPI)
+*   **Supabase**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (and `NEXT_PUBLIC_SUPABASE_ANON_KEY` for frontend)
 *   **Redis**: `REDIS_URL`
-*   **AI APIs & Model Mapping**:
-    *   `GEMINI_API_KEY`: Used for Gemini Text (Prompt refinement), Gemini Image Generation, and Gemini Video Generation.
-    *   `GOOGLE_FLOW_API_KEY`: Used for Google Flow image generation.
-    *   `NANO_BANANA_API_KEY`: Used for both Nano Banana Pro and Nano Banana 2 image generation.
-    *   `FREEPIK_API_KEY`: Used for Freepik Magnific (Image) and Freepik Video generation.
-    *   `KLING_API_KEY`: Used for Kling 2.5 video synthesis.
-    *   `MINIMAX_API_KEY`: Used for Minimax Hailuo Fast 2.3 Fast video synthesis.
+*   **AI APIs**:
+    *   `GEMINI_API_KEY`: Used for Gemini Text (Prompt refinement), Gemini Image Generation (Imagen 3), and Gemini Video Generation (Veo 3.1).
+    *   `FREEPIK_API_KEY`: Used for Freepik Mystic (Image) and Freepik Video (Kling / Minimax / Video).
 
-*Security Note: All 3rd party API calls happen from the FastAPI/Celery backend. The Next.js frontend never sees these API keys.*
+*Security Note: All 3rd party AI API calls happen from the FastAPI/Celery backend. The Next.js frontend never sees these API keys.*

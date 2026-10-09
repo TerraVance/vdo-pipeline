@@ -1,4 +1,4 @@
-import os
+
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from functools import lru_cache
@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # AI APIs — only 2 keys needed
     gemini_api_key: str = ""    # Powers: prompt refinement, image gen (Imagen 3), video gen (Veo 2)
     freepik_api_key: str = ""   # Powers: image gen (Magnific/Mystic), video gen (Freepik Video)
+
+    # Supabase JWT Secret — used for local JWT verification (no network call)
+    # Find it in: Supabase Dashboard → Settings → API → JWT Secret
+    supabase_jwt_secret: str = ""
 
     class Config:
         env_file = str(_ENV_FILE)

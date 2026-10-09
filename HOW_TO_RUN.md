@@ -1,6 +1,6 @@
-# How to Run the Video Generation Pipeline
+# How to Run the Image Generation Pipeline
 
-This guide provides step-by-step instructions to get the Interactive AI Video Generation Pipeline running on your local machine.
+This guide provides step-by-step instructions to get the Interactive AI Image Generation Pipeline running on your local machine.
 
 ## Prerequisites
 
@@ -16,12 +16,20 @@ You will also need your API keys:
 
 ---
 
+## Key Features & Architecture Notes
+- **Prompt Refinement**: The pipeline uses Gemini to expand your initial idea into a highly specific `image_prompt` optimized for image generators.
+- **Cache-Busting Storage**: All generated media uploaded to Supabase automatically append a timestamp (`?t=timestamp`) to bypass aggressive browser caching, ensuring the UI updates instantly.
+- **Smart Quota & Graceful Fallbacks**: The backend tracks Gemini free-tier `429 RESOURCE_EXHAUSTED` responses and caches cooldown timers. If a model fails due to rate limits or API changes, the Celery worker will automatically skip failing providers and reroute the generation task to Freepik Mystic or bubble up honest UI errors (never silently falling back to fake content).
+- **Gemini Content Modality**: Uses the modern `generate_content` SDK API with `response_modalities=["IMAGE"]` instead of legacy methods.
+
+---
+
 ## Step 1: Supabase Setup
 
 1. Create a new project in your Supabase dashboard.
 2. **Database Setup (Migration)**: 
    - Go to the **SQL Editor** in your Supabase dashboard.
-   - Copy the contents of [`schema.sql`](./schema.sql) (located in the root of this repository) and run it. This will create the `projects` table and setup Row Level Security (RLS) policies.
+   - Copy the contents of [`supabase/schema.sql`](./supabase/schema.sql) (located in the supabase folder of this repository) and run it. This will create the `projects` table and setup Row Level Security (RLS) policies.
 3. **Storage (Crucial)**:
    - Go to **Storage** in the Supabase dashboard.
    - Click **New Bucket**.
@@ -117,8 +125,8 @@ cd frontend
 
 1. Open your browser and navigate to: **http://localhost:3003**
 2. The backend API docs are available at: **http://localhost:8001/docs**
-2. You should see the Interactive AI Video Generation Pipeline UI.
-3. Start by entering a prompt in **Step 1** and proceed through the steps to test the end-to-end integration!
+2. You should see the Interactive AI Image Generation Pipeline UI.
+3. Start by selecting "Refine Prompt" or "Create Image" to test the integration!
 
 ## Troubleshooting
 

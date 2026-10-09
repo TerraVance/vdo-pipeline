@@ -19,8 +19,8 @@ The core user experience is structured around a sequential 4-step stateful wizar
   - **Action:** Clicking **"Initialize Pipeline"** triggers the payload creation and navigates to Step 2.
 
 ### **Step 2: Prompt Refinement**
-  - **Interface:** Side-by-side comparison panel showing the original input versus the AI-expanded prompt.
-  - **Functionality:** The system passes the raw input to the **Gemini API** (with a fallback to a Playwright-managed web automation worker) to build a rich, detailed production prompt including lighting, camera angles, textures, and mood details.
+  - **Interface:** Side-by-side comparison panel showing the original input versus the AI-expanded script, plus an "Advanced" panel for model-specific prompts.
+  - **Functionality:** The system passes the raw input to the **Gemini API** which breaks the concept down into a detailed cinematic script, a focused **image_prompt**, and a specific **motion_prompt**.
   - **User Actions:**
       - **Manual Edit:** Users can directly modify the expanded text in an editable text field.
       - **Regenerate:** Request a new prompt expansion using alternate system instructions.
@@ -28,7 +28,7 @@ The core user experience is structured around a sequential 4-step stateful wizar
 
 ### **Step 3: Visual Generation**
   - **Interface:** Interactive 2x2 grid displaying generated static image options.
-  - **Functionality:** Calls the image generation models (**Google Flow**, **Nano Banana Pro**, **Nano Banana 2**, **Gemini**, or **Freepik Magnific**) to render 2–4 candidate frame variations based on the refined prompt.
+  - **Functionality:** Calls the image generation models (**Google Gemini Imagen 3** or **Freepik Mystic**) to render 4 candidate frame variations based on the refined prompt.
   - **User Actions:**
       - **Select:** Choose a primary frame to serve as the baseline seed for video generation.
       - **Iterate Prompt:** Adjust text modifiers and re-trigger visual generation.
@@ -36,7 +36,7 @@ The core user experience is structured around a sequential 4-step stateful wizar
 
 ### **Step 4: Video Synthesis**
   - **Interface:** Video player featuring playback controls, resolution toggles, direct download options, and export format selections.
-  - **Functionality:** Sends the selected image frame and generation parameters to advanced video engines (**Kling 2.5**, **Minimax Hailuo Fast 2.3 Fast**, **Gemini**, or **Freepik** at **720p** resolution).
+  - **Functionality:** Sends the selected image frame and generation parameters to advanced video engines (**Google Gemini Veo 3.1** or **Freepik AI Video**). Supports stitching multiple scenes together via FFmpeg.
   - **User Actions:**
       - **Preview & Export:** Render final MP4 asset.
       - **Backtrack:** Revert to Step 3 to pick a different image frame if motion artifacts occur.
@@ -48,9 +48,9 @@ The core user experience is structured around a sequential 4-step stateful wizar
 | Step | Focus Area | Inputs | Processing Engine | User Capabilities |
 | :--- | :--- | :--- | :--- | :--- |
 | **01** | **Idea Input** | Raw Text, Style Tags | Client Input Processing | Submit draft concept |
-| **02** | **Prompt Refinement** | Raw Concept | Gemini API / Playwright Fallback | Edit expanded text, regenerate prompt |
-| **03** | **Visual Generation** | Refined Prompt | Google Flow / Nano Banana / Gemini / Freepik | Select 1 of 4 images, refine prompt, step back |
-| **04** | **Video Synthesis** | Seed Image + Prompt | Kling 2.5 / Minimax / Gemini / Freepik (720p) | Download MP4, step back to re-frame |
+| **02** | **Prompt Refinement** | Raw Concept | Gemini API | Edit expanded script, image prompt, and motion prompt |
+| **03** | **Visual Generation** | Image Prompt | Gemini Imagen / Freepik Mystic | Select up to 4 images, refine prompt, step back |
+| **04** | **Video Synthesis** | Seed Images + Motion Prompt | Gemini Veo / Freepik Video | Download MP4, step back to re-frame |
 
 ---
 
@@ -75,10 +75,10 @@ The platform uses a decoupled client-server model designed for asynchronous hand
 +---------------+          +---------------+          +-----------------+
 |   DATABASE    |          |  JOB QUEUE    |          |  EXTERNAL APIs  |
 |  Supabase     |          | Redis + Bull  |          |  - Gemini API   |
-| (PostgreSQL)  |          | Celery Workers|          |  - Google Flow  |
-| Session State |          | Background    |          |  - Nano Banana  |
-| Job Statuses  |          | Render Tasks  |          |  - Freepik      |
-|               |          |               |          |  - Kling/Minimax|
+| (PostgreSQL)  |          | Celery Workers|          |                 |
+| Session State |          | Background    |          |  - Freepik      |
+| Job Statuses  |          | Render Tasks  |          |                 |
+|               |          |               |          |                 |
 +---------------+          +---------------+          +-----------------+
 ```
 
@@ -90,8 +90,8 @@ The platform uses a decoupled client-server model designed for asynchronous hand
   - **Task Engine:** **Redis + Celery (or BullMQ)** to handle async video processing tasks and prevent HTTP timeout errors during long video renders.
   - **API Integrations:**
       - *LLM:* Gemini API (Primary text expansion engine).
-      - *Image:* Google Flow, Nano Banana Pro, Nano Banana 2, Gemini, Freepik Magnific.
-      - *Video:* Kling 2.5, Minimax Hailuo Fast 2.3 Fast, Gemini, Freepik (720p resolution).
+      - *Image:* Gemini (Imagen 3), Freepik (Mystic).
+      - *Video:* Gemini (Veo 3.1), Freepik (Kling 2.5, Minimax Hailuo).
 
 ## **5. Non-Functional Requirements**
   - **Performance & Asynchrony:**

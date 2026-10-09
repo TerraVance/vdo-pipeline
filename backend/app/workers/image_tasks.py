@@ -8,7 +8,7 @@ from app.models.schemas import PipelineStatus
 
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=10)
-def generate_images_task(self, project_id: str, model: str, prompt: str):
+def generate_images_task(self, project_id: str, model: str, prompt: str, aspect_ratio: str = "16:9"):
     """
     Celery task — Stage 6.6:
     1. Call image provider API
@@ -25,10 +25,12 @@ def generate_images_task(self, project_id: str, model: str, prompt: str):
         # Run async image generation
         provider = get_image_provider(model)
         raw_urls = asyncio.run(
-            provider.generate(prompt=prompt, count=4)
+            provider.generate(prompt=prompt, count=4, aspect_ratio=aspect_ratio)
         )
 
         # Upload to Supabase Storage and get public URLs
+        import time
+        timestamp = int(time.time())
         public_urls = []
         for i, url_or_data in enumerate(raw_urls):
             storage_path = f"projects/{project_id}/images/image_{i}.png"
@@ -37,7 +39,7 @@ def generate_images_task(self, project_id: str, model: str, prompt: str):
                 storage_path, image_bytes, {"content-type": "image/png", "upsert": "true"}
             )
             public_url = db.storage.from_("media").get_public_url(storage_path)
-            public_urls.append(public_url)
+            public_urls.append(f"{public_url}?t={timestamp}")
 
         # Update project with results
         db.table("projects").update(
@@ -59,7 +61,7 @@ def _fetch_or_decode_image(url_or_data: str) -> bytes:
     """Handle both public URLs and base64 data URLs returned by providers."""
     if url_or_data.startswith("data:image"):
         # base64 encoded image from Gemini
-        header, encoded = url_or_data.split(",", 1)
+        _, encoded = url_or_data.split(",", 1)
         return base64.b64decode(encoded)
     else:
         # Fetch from public URL

@@ -12,33 +12,86 @@ from google import genai
 router = APIRouter(prefix="/api/v1/projects", tags=["prompt"])
 
 # ── System prompt templates ───────────────────────────────────────────────────
+#
+# The LLM returns a structured response with THREE clearly-delimited sections.
+# This lets image generation and video generation each use the right prompt type.
 
-SYSTEM_PROMPT_PRIMARY = """You are a world-class creative director and prompt engineer specializing in AI video and image generation.
-Your task is to take a raw concept and expand it into a rich, detailed production-ready prompt.
+SYSTEM_PROMPT_PRIMARY = """\
+You are a world-class creative director and AI prompt engineer.
 
-The refined prompt MUST include:
-- Precise subject description (character/object/scene details)
-- Camera angle and movement (e.g., "slow dolly push-in", "bird's eye view", "Dutch angle")
-- Lighting setup (e.g., "dramatic neon backlighting", "golden hour soft rays", "high-contrast chiaroscuro")
-- Color palette and mood (e.g., "desaturated blues and teals", "warm amber tones")
-- Texture and material details (e.g., "wet asphalt reflecting neon", "worn leather texture")
-- Atmospheric effects (e.g., "heavy rain", "volumetric fog", "lens flare")
-- Style reference (e.g., "cinematic, anamorphic lens, 4K ultra-HD, film grain")
+Given the user's raw concept, produce a structured production brief with exactly THREE sections.
+Each section must start on its own line with the exact label shown.
 
-Keep the output to 150-200 words. Output ONLY the refined prompt, no explanation or preamble."""
+IMAGE_PROMPT:
+A focused, 40–60 word visual description for a still-image AI generator.
+Describe ONLY the static visual: subject details, scene setting, lighting, color palette, camera angle.
+Do NOT mention motion, animation, or time-based events.
 
-SYSTEM_PROMPT_ALTERNATE = """You are an avant-garde visual artist and AI prompt engineer. Your style is unexpected, bold, and imaginative.
-Expand the user's concept into a striking, unconventional production prompt.
+FULL_SCRIPT:
+A rich 120–160 word cinematic production description.
+Include: subject, scene, lighting, color palette, texture, atmosphere, style reference.
 
-Include:
-- Unexpected compositional choices (e.g., symmetrical split-diopter, extreme macro)
-- Distinctive color treatment (e.g., "monochromatic teal with single red accent")
-- Unusual atmospheric conditions
-- Specific cinematic or artistic style reference
-- Emotional undertone
-- Material and textural specifics
+CRITICAL RULES:
+- The user's original concept MUST be the core of every section. Expand it, never replace it.
+- Output ONLY the three labeled sections — no preamble, no explanation, no markdown.
+- Start your response immediately with "IMAGE_PROMPT:"
+"""
 
-Keep output to 150-200 words. Output ONLY the refined prompt, no preamble."""
+SYSTEM_PROMPT_ALTERNATE = """\
+You are an avant-garde visual artist and AI prompt engineer. Your style is bold and unexpected.
+
+Given the user's raw concept, produce a structured production brief with exactly THREE sections.
+
+IMAGE_PROMPT:
+A 40–60 word striking static visual description for an image AI.
+Use unconventional composition, distinctive color treatment, unexpected framing.
+ONLY describe the still visual — no motion.
+
+FULL_SCRIPT:
+A 120–160 word avant-garde visual production brief.
+Push boundaries while staying true to the user's original concept.
+
+CRITICAL RULES:
+- The user's original concept MUST be preserved as the foundation.
+- Output ONLY the three labeled sections — no preamble, no explanation.
+- Start immediately with "IMAGE_PROMPT:"
+"""
+
+
+def _parse_dual_prompt(text: str) -> dict:
+    """
+    Parse the structured LLM output into image_prompt, motion_prompt, full_script.
+    Returns a dict with all three keys (each may be empty string on parse failure).
+    """
+    sections = {"image_prompt": "", "full_script": ""}
+    current = None
+    lines_buffer: list[str] = []
+
+    label_map = {
+        "IMAGE_PROMPT:": "image_prompt",
+        "FULL_SCRIPT:": "full_script",
+    }
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        matched_label = None
+        for label, key in label_map.items():
+            if stripped.startswith(label):
+                # Save accumulated lines to previous section
+                if current:
+                    sections[current] = " ".join(lines_buffer).strip()
+                current = key
+                lines_buffer = [stripped[len(label):].strip()]
+                matched_label = label
+                break
+        if not matched_label and current:
+            lines_buffer.append(stripped)
+
+    # Save the last section
+    if current:
+        sections[current] = " ".join(lines_buffer).strip()
+
+    return sections
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -51,29 +104,47 @@ def get_gemini_models():
 
 @router.post("/{project_id}/refine-prompt", response_model=RefinePromptResponse)
 def refine_prompt(project_id: str, payload: RefinePromptRequest):
-    """Stage 5 — Call Gemini to expand the raw prompt into a production-ready description."""
+    """
+    Stage 2 — Call Gemini to expand the raw prompt into a structured production brief.
+
+    Returns:
+      - refined_prompt   (full cinematic script — displayed in Step 2 UI)
+      - image_prompt     (focused visual description → fed to image gen in Step 3)
+    """
     settings = get_settings()
     db = get_supabase()
 
-    # Fetch the project
-    result = db.table("projects").select("*").eq("id", project_id).single().execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Project not found")
+    # Fetch the project (without .single() to avoid PGRST116 exception on 0 rows)
+    result = db.table("projects").select("*").eq("id", project_id).execute()
+    if not result.data or len(result.data) == 0:
+        raise HTTPException(status_code=404, detail="Project not found. Please click '+ New Project' to start fresh.")
 
-    project = result.data
+    project = result.data[0]
     raw_prompt = project["raw_prompt"]
     style_tags = project.get("style_tags") or []
 
-    # Build user message
-    style_context = f" Style preferences: {', '.join(style_tags)}." if style_tags else ""
-    user_message = f"Raw concept: {raw_prompt}{style_context}"
+    # ── DEBUG: log exactly what we received from DB ───────────────────────────
+    print(f"\n[refine_prompt] project_id={project_id}")
+    print(f"[refine_prompt] raw_prompt from DB: {raw_prompt!r}")
+    print(f"[refine_prompt] style_tags: {style_tags}")
+    print(f"[refine_prompt] regenerate={payload.regenerate}, model={payload.gemini_model}")
+
+    # Build user message — always embed the full original text
+    style_context = f"\nStyle preferences: {', '.join(style_tags)}." if style_tags else ""
+    user_message = (
+        f"USER'S ORIGINAL CONCEPT (preserve this exactly as the core idea):\n"
+        f"{raw_prompt}"
+        f"{style_context}"
+    )
 
     # Select system prompt
     system_prompt = SYSTEM_PROMPT_ALTERNATE if payload.regenerate else SYSTEM_PROMPT_PRIMARY
 
-    # Validate model ID — fall back to latest if unknown is passed
+    # Validate model ID
     valid_ids = {m["id"] for m in GEMINI_TEXT_MODELS}
-    model_id = payload.gemini_model if payload.gemini_model in valid_ids else "gemini-3.8-flash"
+    model_id = payload.gemini_model if payload.gemini_model in valid_ids else "gemini-3-flash-preview"
+
+    parsed = {"image_prompt": "", "full_script": ""}
 
     try:
         client = genai.Client(api_key=settings.gemini_api_key)
@@ -82,21 +153,39 @@ def refine_prompt(project_id: str, payload: RefinePromptRequest):
             contents=user_message,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                temperature=0.85,
-                max_output_tokens=400,
+                temperature=0.82,
+                max_output_tokens=600,
             ),
         )
-        refined_prompt = response.text.strip()
-    except Exception as e:
-        print(f"Gemini API error (falling back to raw prompt): {e}")
-        # If Gemini is overloaded (503) or fails, just gracefully bypass it 
-        # using the raw prompt so the user isn't blocked.
-        refined_prompt = f"{raw_prompt} {style_context}".strip()
+        raw_output = response.text.strip()
+        print(f"[refine_prompt] LLM raw output ({len(raw_output)} chars):\n{raw_output[:500]}")
+        parsed = _parse_dual_prompt(raw_output)
+        print(f"[refine_prompt] parsed image_prompt: {parsed['image_prompt'][:80]!r}")
+        print(f"[refine_prompt] parsed full_script (first 100): {parsed['full_script'][:100]!r}")
 
-    # Persist to DB
+        # If parse failed (missing sections), use full output as refined_prompt
+        if not parsed["image_prompt"] and not parsed["full_script"]:
+            parsed["full_script"] = raw_output
+            parsed["image_prompt"] = raw_output[:300]  # truncate for image model
+
+    except Exception as e:
+        print(f"Gemini API error in refine_prompt: {e}")
+        # Graceful fallback — user is not blocked
+        style_suffix = f" {style_context}".strip()
+        parsed["full_script"] = f"{raw_prompt}{style_suffix}"
+        parsed["image_prompt"] = f"{raw_prompt}{style_suffix}"
+
+    # refined_prompt shown in Step 2 UI = full script
+    refined_prompt = parsed["full_script"] or parsed["image_prompt"] or raw_prompt
+
+    # Persist all three to DB
+    # image_prompt and motion_prompt columns must exist in the projects table.
+    # If they don't yet, the update will silently ignore them (Supabase/PostgREST
+    # ignores unknown columns in PATCH/UPDATE calls).
     db.table("projects").update(
         {
             "refined_prompt": refined_prompt,
+            "image_prompt": parsed["image_prompt"],
             "status": PipelineStatus.PROMPT_REFINED.value,
         }
     ).eq("id", project_id).execute()
@@ -105,5 +194,6 @@ def refine_prompt(project_id: str, payload: RefinePromptRequest):
         project_id=project_id,
         original_prompt=raw_prompt,
         refined_prompt=refined_prompt,
+        image_prompt=parsed["image_prompt"],
         status=PipelineStatus.PROMPT_REFINED,
     )
