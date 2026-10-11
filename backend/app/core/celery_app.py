@@ -9,7 +9,6 @@ celery_app = Celery(
     backend=settings.redis_url,
     include=[
         "app.workers.image_tasks",
-        "app.workers.video_tasks",
     ],
 )
 

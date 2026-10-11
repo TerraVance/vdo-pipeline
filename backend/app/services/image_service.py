@@ -66,11 +66,9 @@ class GeminiImageProvider(ImageProvider):
 
         # ── Check if Gemini is quota-exhausted ────────────────────────
         if time.time() < _gemini_image_quota_exhausted_until:
-            remaining = int(_gemini_image_quota_exhausted_until - time.time())
-            raise RuntimeError(
-                f"Gemini image quota exhausted. Resets in {remaining // 3600}h {(remaining % 3600) // 60}m. "
-                f"Routing to Freepik fallback."
-            )
+            print("[GeminiImageProvider] Quota still exhausted. Skipping Gemini and routing directly to Freepik fallback...")
+            fallback_provider = FreepikMysticProvider(style="photo")
+            return await fallback_provider.generate(prompt, count, aspect_ratio)
 
         settings = get_settings()
         client = genai.Client(api_key=settings.gemini_api_key)
@@ -84,6 +82,9 @@ class GeminiImageProvider(ImageProvider):
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_modalities=["IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio=aspect_ratio
+                        ),
                     ),
                 )
 
@@ -175,8 +176,15 @@ class FreepikMysticProvider(ImageProvider):
             "Content-Type": "application/json",
         }
 
-        # Translate aspect ratio string → pixel dimensions for Freepik
-        width, height = ASPECT_TO_PIXELS.get(aspect_ratio, _DEFAULT_PIXELS)
+        # Translate aspect ratio string -> Freepik exact string
+        aspect_map = {
+            "16:9": "widescreen_16_9",
+            "9:16": "social_story_9_16",
+            "1:1": "square_1_1",
+            "4:3": "classic_4_3",
+            "3:4": "traditional_3_4",
+        }
+        freepik_aspect = aspect_map.get(aspect_ratio, "widescreen_16_9")
 
         async with httpx.AsyncClient(timeout=90) as client:
             # Step 1: Submit the job
@@ -185,7 +193,7 @@ class FreepikMysticProvider(ImageProvider):
                 headers=headers,
                 json={
                     "prompt": prompt,
-                    "image": {"size": {"width": width, "height": height}},
+                    "aspect_ratio": freepik_aspect,
                     "styling": {"style": self.style},
                 },
             )

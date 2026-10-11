@@ -51,7 +51,7 @@ class RefinePromptRequest(BaseModel):
 # ── Available Gemini text models (for frontend dropdown) ──────────────────────
 GEMINI_TEXT_MODELS = [
     {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash",        "description": "Latest & fastest — recommended"},
-    {"id": "gemini-2.5-flash",       "label": "Gemini 2.5 Flash",      "description": "Stable, proven for creative tasks"},
+    {"id": "gemini-3.8-flash",       "label": "Gemini 3.8 Flash",      "description": "Stable, proven for creative tasks"},
     {"id": "gemini-3.1-flash-lite",  "label": "Gemini 3.1 Flash Lite", "description": "Most cost-efficient, high volume"},
     {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro",        "description": "Highest quality, slower (paid tier)"},
 ]

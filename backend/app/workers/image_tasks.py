@@ -68,3 +68,41 @@ def _fetch_or_decode_image(url_or_data: str) -> bytes:
         response = httpx.get(url_or_data, timeout=30)
         response.raise_for_status()
         return response.content
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=10)
+def generate_message_images_task(self, message_id: str, model: str, prompt: str, aspect_ratio: str = "16:9"):
+    db = get_supabase()
+    try:
+        # Run async image generation
+        provider = get_image_provider(model)
+        raw_urls = asyncio.run(
+            provider.generate(prompt=prompt, count=4, aspect_ratio=aspect_ratio)
+        )
+
+        # Upload to Supabase Storage and get public URLs
+        import time
+        timestamp = int(time.time())
+        public_urls = []
+        for i, url_or_data in enumerate(raw_urls):
+            storage_path = f"messages/{message_id}/images/image_{i}.png"
+            image_bytes = _fetch_or_decode_image(url_or_data)
+            db.storage.from_("media").upload(
+                storage_path, image_bytes, {"content-type": "image/png", "upsert": "true"}
+            )
+            public_url = db.storage.from_("media").get_public_url(storage_path)
+            public_urls.append(f"{public_url}?t={timestamp}")
+
+        # Update message with results
+        db.table("messages").update(
+            {
+                "image_urls": public_urls,
+                "status": "COMPLETED",
+            }
+        ).eq("id", message_id).execute()
+
+    except Exception as exc:
+        if self.request.retries >= self.max_retries:
+            db.table("messages").update(
+                {"status": "FAILED"}
+            ).eq("id", message_id).execute()
+        raise self.retry(exc=exc)

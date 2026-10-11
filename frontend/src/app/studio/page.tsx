@@ -7,21 +7,39 @@ import {
   Loader2, 
   PlusCircle, 
   MessageSquare, 
-  Cpu
+  Cpu,
+  Trash2,
+  X
 } from "lucide-react";
+
+// Simple markdown parser for chat bubbles
+const renderFormattedText = (text: string) => {
+  if (!text) return null;
+  // Replace bold (**text**)
+  const parts = text.split(/(\*\*.*?\*\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={i} className="font-semibold text-white">{part.slice(2, -2)}</strong>;
+    }
+    return <span key={i}>{part}</span>;
+  });
+};
 
 export default function StudioPage() {
   const [sessions, setSessions] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
   
   const [input, setInput] = useState("");
   const [action, setAction] = useState("refine_prompt");
-  const [model, setModel] = useState("gemini-3.1-flash");
+  const [model, setModel] = useState("gemini-3.8-flash");
   const [aspectRatio, setAspectRatio] = useState("16:9");
   
   const [isSending, setIsSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const prevMessagesLengthRef = useRef(0);
 
   // Poll for messages
   useEffect(() => {
@@ -40,8 +58,28 @@ export default function StudioPage() {
   }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = chatContainerRef.current;
+    if (!container) return;
+
+    // Check if user is already near the bottom (within 150px)
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+    
+    // Auto-scroll if a new message is appended OR if user is near bottom while polling updates
+    if (messages.length > prevMessagesLengthRef.current || isNearBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    
+    prevMessagesLengthRef.current = messages.length;
   }, [messages]);
+
+  useEffect(() => {
+    // Reset model state when action changes so we don't accidentally send a text model to the image API
+    if (action === "refine_prompt") {
+      setModel("gemini-3.8-flash");
+    } else if (action === "create_image") {
+      setModel("gemini_imagen3");
+    }
+  }, [action]);
 
   const fetchSessions = async () => {
     try {
@@ -77,6 +115,30 @@ export default function StudioPage() {
     }
   };
 
+  const deleteSession = async (e: React.MouseEvent, sessionId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Fallback if browser blocked window.confirm
+    try {
+      await apiClient.delete(`/api/v1/chat/sessions/${sessionId}`);
+      const remaining = sessions.filter(s => s.id !== sessionId);
+      setSessions(remaining);
+      
+      if (activeSessionId === sessionId) {
+        setMessages([]);
+        if (remaining.length > 0) {
+          setActiveSessionId(remaining[0].id);
+        } else {
+          setActiveSessionId(null);
+          createSession();
+        }
+      }
+    } catch (err) {
+      console.error("Failed to delete chat", err);
+    }
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || !activeSessionId) return;
@@ -97,6 +159,11 @@ export default function StudioPage() {
       
       await apiClient.post(`/api/v1/chat/sessions/${activeSessionId}/messages`, userMessage);
       await fetchMessages(activeSessionId);
+      
+      // Refresh the sidebar to show the auto-generated title if this was the first message
+      if (messages.length === 0) {
+        await fetchSessions();
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -105,7 +172,7 @@ export default function StudioPage() {
   };
 
   return (
-    <div className="flex h-[calc(100vh-80px)] w-full max-w-[1600px] mx-auto overflow-hidden rounded-2xl border border-white/10 glass-panel shadow-2xl">
+    <div className="flex h-[calc(100vh-176px)] w-full max-w-[1600px] mx-auto overflow-hidden rounded-2xl border border-white/10 glass-panel shadow-2xl">
       
       {/* ── Sidebar ── */}
       <div className="w-64 bg-black/40 border-r border-white/5 flex flex-col">
@@ -124,16 +191,30 @@ export default function StudioPage() {
             Recent Chats
           </div>
           {sessions.map(s => (
-            <button
-              key={s.id}
-              onClick={() => setActiveSessionId(s.id)}
-              className={`w-full text-left px-3 py-3 rounded-lg text-sm flex items-center gap-3 transition-colors ${
-                activeSessionId === s.id ? "bg-white/10 text-white" : "text-white/60 hover:bg-white/5 hover:text-white"
-              }`}
-            >
-              <MessageSquare className="w-4 h-4 opacity-50" />
-              <div className="flex-1 truncate">{s.title}</div>
-            </button>
+            <div key={s.id} className="relative group">
+              <button
+                onClick={() => setActiveSessionId(s.id)}
+                className={`w-full text-left px-3 py-3 rounded-lg text-sm flex items-center gap-3 transition-colors ${
+                  activeSessionId === s.id ? "bg-white/10 text-white" : "text-white/60 hover:bg-white/5 hover:text-white"
+                }`}
+              >
+                <MessageSquare className="w-4 h-4 opacity-50 shrink-0" />
+                <div className="truncate pr-8">{s.title}</div>
+              </button>
+              
+              <button 
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  deleteSession(e, s.id);
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 hover:bg-red-500/20 text-white/60 hover:text-red-400 p-1.5 rounded-md transition-all z-10 cursor-pointer"
+                title="Delete Chat"
+                type="button"
+              >
+                <Trash2 className="w-4 h-4 pointer-events-none" />
+              </button>
+            </div>
           ))}
         </div>
       </div>
@@ -142,7 +223,7 @@ export default function StudioPage() {
       <div className="flex-1 flex flex-col bg-black/20">
         
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
+        <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
           {messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
               <Cpu className="w-12 h-12 mb-4" />
@@ -157,13 +238,21 @@ export default function StudioPage() {
                     ? "bg-primary/20 text-white border border-primary/30 rounded-br-none" 
                     : "bg-white/5 text-white/90 border border-white/10 rounded-bl-none"
                 }`}>
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</div>
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                    {renderFormattedText(msg.content)}
+                  </div>
                   
                   {/* Visuals */}
                   {msg.image_urls && msg.image_urls.length > 0 && (
                     <div className="grid grid-cols-2 gap-2 mt-4">
                       {msg.image_urls.map((url: string, i: number) => (
-                        <img key={i} src={url} alt="Generated" className="rounded-lg border border-white/10 w-full aspect-video object-cover" />
+                        <img 
+                          key={i} 
+                          src={url} 
+                          alt="Generated" 
+                          className="rounded-lg border border-white/10 w-full h-auto cursor-pointer hover:opacity-80 transition-opacity" 
+                          onClick={() => setSelectedImage(url)}
+                        />
                       ))}
                     </div>
                   )}
@@ -174,6 +263,12 @@ export default function StudioPage() {
                     <div className="mt-3 flex items-center gap-2 text-xs text-primary animate-pulse">
                       <Loader2 className="w-3 h-3 animate-spin" />
                       Generating content...
+                    </div>
+                  )}
+                  {msg.role === "assistant" && msg.status === "FAILED" && (
+                    <div className="mt-3 flex items-center gap-2 text-xs text-red-400">
+                      <span className="w-2 h-2 rounded-full bg-red-400" />
+                      Failed to generate content. Please try again.
                     </div>
                   )}
                 </div>
@@ -205,8 +300,8 @@ export default function StudioPage() {
               >
                 {action === "refine_prompt" && (
                   <>
-                    <option value="gemini-3.1-flash">Gemini 3.1 Flash</option>
-                    <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro</option>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+                    <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                   </>
                 )}
                 {action === "create_image" && (
@@ -260,7 +355,34 @@ export default function StudioPage() {
           </form>
         </div>
         
+        
       </div>
+
+      {/* ── Image Lightbox Modal ── */}
+      {selectedImage && (
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+          onClick={() => setSelectedImage(null)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh] flex items-center justify-center">
+            <button 
+              className="absolute -top-12 right-0 text-white/70 hover:text-white p-2 rounded-full hover:bg-white/10 transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSelectedImage(null);
+              }}
+            >
+              <X className="w-6 h-6" />
+            </button>
+            <img 
+              src={selectedImage} 
+              alt="Generated full size" 
+              className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl border border-white/10"
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
