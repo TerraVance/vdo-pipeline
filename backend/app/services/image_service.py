@@ -1,9 +1,13 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
-import base64
-import httpx
 import asyncio
+import base64
+import random
+import httpx
 import time
 from app.core.config import get_settings
+from app.core.logging import logger
+from app.core.circuit_breaker import gemini_image_breaker, freepik_breaker
 
 
 # ── Aspect ratio → pixel dimension lookup (used by Freepik) ──────────────────
@@ -19,11 +23,11 @@ ASPECT_TO_PIXELS: dict[str, tuple[int, int]] = {
 # Fallback if an unsupported ratio is passed
 _DEFAULT_PIXELS = (1920, 1080)
 
-# ── Quota exhaustion tracker ─────────────────────────────────────────────────
-# When Gemini returns 429 RESOURCE_EXHAUSTED, we record the timestamp so that
-# subsequent requests skip Gemini entirely and go straight to Freepik.
-# This avoids wasting 5-10s per request on a provider that's guaranteed to fail.
-_gemini_image_quota_exhausted_until: float = 0.0
+# Finish reasons that indicate the model will never produce an image for this prompt
+_TERMINAL_FINISH_REASONS = {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII"}
+
+# Freepik task statuses that indicate permanent failure
+_FREEPIK_FATAL_STATUSES = {"FAILED", "ERROR", "CANCELLED"}
 
 
 class ImageProvider(ABC):
@@ -60,90 +64,160 @@ class GeminiImageProvider(ImageProvider):
         self.model_name = model_name
 
     async def generate(self, prompt: str, count: int = 4, aspect_ratio: str = "16:9") -> list[str]:
-        global _gemini_image_quota_exhausted_until
         from google import genai
         from google.genai import types
 
-        # ── Check if Gemini is quota-exhausted ────────────────────────
-        if time.time() < _gemini_image_quota_exhausted_until:
-            print("[GeminiImageProvider] Quota still exhausted. Skipping Gemini and routing directly to Freepik fallback...")
-            fallback_provider = FreepikMysticProvider(style="photo")
-            return await fallback_provider.generate(prompt, count, aspect_ratio)
+        # ── Circuit breaker check ─────────────────────────────────────────────
+        if not gemini_image_breaker.allow_request():
+            logger.warning(
+                f"[GeminiImageProvider:{self.model_name}] Circuit OPEN — "
+                "routing directly to Freepik fallback"
+            )
+            return await self._fallback(prompt, count, aspect_ratio)
 
         settings = get_settings()
         client = genai.Client(api_key=settings.gemini_api_key)
+        results: list[str] = []
 
         try:
-            results = []
             for i in range(min(count, 4)):
-                # Gemini image models use generate_content with IMAGE modality
+                image_data = await self._generate_single(
+                    client, types, prompt, aspect_ratio, image_index=i
+                )
+                if image_data:
+                    results.append(image_data)
+
+                # Staggered delay between calls to avoid burst rate-limiting
+                if i < count - 1:
+                    await asyncio.sleep(1 + random.uniform(0, 0.5))
+
+            if not results:
+                raise RuntimeError(
+                    f"[GeminiImageProvider:{self.model_name}] "
+                    f"No images produced after {count} attempt(s)"
+                )
+
+            gemini_image_breaker.record_success()
+            return results
+
+        except Exception as e:
+            error_str = str(e)
+            gemini_image_breaker.record_failure()
+
+            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str:
+                logger.warning(
+                    f"[GeminiImageProvider:{self.model_name}] Quota exhausted. "
+                    "Circuit breaker will manage cooldown."
+                )
+            else:
+                logger.error(f"[GeminiImageProvider:{self.model_name}] Error: {e}")
+
+            logger.info(f"[GeminiImageProvider:{self.model_name}] Routing to Freepik fallback...")
+            return await self._fallback(prompt, count, aspect_ratio)
+
+    async def _generate_single(
+        self,
+        client,
+        types,
+        prompt: str,
+        aspect_ratio: str,
+        image_index: int,
+    ) -> str | None:
+        """
+        Attempt to generate a single image with up to 3 retries.
+        Returns a base64 data-URI on success, or None if all attempts yield empty output.
+        """
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            try:
                 response = client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_modalities=["IMAGE"],
-                        image_config=types.ImageConfig(
-                            aspect_ratio=aspect_ratio
-                        ),
+                        image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
                     ),
                 )
 
-                # Extract image from response parts
-                if (response.candidates
-                        and response.candidates[0].content
-                        and response.candidates[0].content.parts):
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data and part.inline_data.mime_type and "image" in part.inline_data.mime_type:
-                            mime = part.inline_data.mime_type
-                            img_data = part.inline_data.data
-                            # SDK may return raw bytes or base64 string
-                            if isinstance(img_data, bytes):
-                                b64 = base64.b64encode(img_data).decode()
-                            else:
-                                b64 = img_data
-                            results.append(f"data:{mime};base64,{b64}")
-                            break  # one image per call
+                # ── Validate candidate ────────────────────────────────────────
+                if not response.candidates:
+                    logger.warning(
+                        f"[GeminiImageProvider] image[{image_index}] attempt {attempt}: "
+                        "no candidates in response"
+                    )
+                else:
+                    candidate = response.candidates[0]
+                    finish_reason = str(getattr(candidate, "finish_reason", "") or "")
 
-                # Small delay between calls to avoid rate limiting
-                if i < count - 1:
-                    await asyncio.sleep(1)
+                    # Safety / recitation block — no point retrying
+                    if finish_reason in _TERMINAL_FINISH_REASONS:
+                        logger.warning(
+                            f"[GeminiImageProvider] image[{image_index}] blocked: "
+                            f"finish_reason={finish_reason}"
+                        )
+                        return None
 
-            if not results:
-                raise RuntimeError(f"Gemini {self.model_name} returned no image data in {count} attempts")
-            return results
+                    # Try to extract inline image data
+                    if candidate.content and candidate.content.parts:
+                        for part in candidate.content.parts:
+                            if (
+                                part.inline_data
+                                and part.inline_data.mime_type
+                                and "image" in part.inline_data.mime_type
+                            ):
+                                mime = part.inline_data.mime_type
+                                img_data = part.inline_data.data
+                                b64 = (
+                                    base64.b64encode(img_data).decode()
+                                    if isinstance(img_data, bytes)
+                                    else img_data
+                                )
+                                logger.debug(
+                                    f"[GeminiImageProvider] image[{image_index}] "
+                                    f"generated successfully (attempt {attempt})"
+                                )
+                                return f"data:{mime};base64,{b64}"
 
-        except Exception as e:
-            error_str = str(e)
+                # Empty output — retry with backoff
+                if attempt < max_attempts:
+                    wait = min(2.0 * (2 ** (attempt - 1)), 16.0)
+                    wait += random.uniform(0, 0.5)  # jitter
+                    logger.warning(
+                        f"[GeminiImageProvider] image[{image_index}] attempt {attempt}: "
+                        f"empty output. Retrying in {wait:.1f}s..."
+                    )
+                    await asyncio.sleep(wait)
 
-            # Detect quota exhaustion and record cooldown
-            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str:
-                # Parse retry delay if available, default to 1 hour
-                cooldown_seconds = 3600
-                if "retryDelay" in error_str:
-                    try:
-                        import re
-                        match = re.search(r'"retryDelay":\s*"(\d+)s"', error_str)
-                        if match:
-                            cooldown_seconds = int(match.group(1))
-                    except Exception:
-                        pass
-                elif "retry in" in error_str.lower():
-                    try:
-                        import re
-                        match = re.search(r'retry in (\d+)h(\d+)m', error_str.lower())
-                        if match:
-                            cooldown_seconds = int(match.group(1)) * 3600 + int(match.group(2)) * 60
-                    except Exception:
-                        pass
+            except Exception as e:
+                error_str = str(e)
+                # Quota / auth errors — don't retry at the single-image level
+                if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "PERMISSION_DENIED" in error_str:
+                    raise  # bubble up to generate() which routes to fallback
 
-                _gemini_image_quota_exhausted_until = time.time() + cooldown_seconds
-                hours = cooldown_seconds // 3600
-                mins = (cooldown_seconds % 3600) // 60
-                print(f"[GeminiImageProvider] Quota exhausted. Cooldown set for {hours}h {mins}m.")
+                if attempt < max_attempts:
+                    wait = min(2.0 * (2 ** (attempt - 1)), 16.0) + random.uniform(0, 0.5)
+                    logger.warning(
+                        f"[GeminiImageProvider] image[{image_index}] attempt {attempt} "
+                        f"error ({type(e).__name__}: {e}). Retrying in {wait:.1f}s..."
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        f"[GeminiImageProvider] image[{image_index}] all {max_attempts} "
+                        f"attempts failed. Last error: {e}"
+                    )
+                    raise
 
-            print(f"[GeminiImageProvider] Failed ({e}). Routing to Freepik Mystic fallback...")
-            fallback_provider = FreepikMysticProvider(style="photo")
-            return await fallback_provider.generate(prompt, count, aspect_ratio)
+        logger.warning(
+            f"[GeminiImageProvider] image[{image_index}] produced no output "
+            f"after {max_attempts} attempts"
+        )
+        return None
+
+    async def _fallback(self, prompt: str, count: int, aspect_ratio: str) -> list[str]:
+        """Route to Freepik when Gemini is unavailable."""
+        return await FreepikMysticProvider(style="photo").generate(prompt, count, aspect_ratio)
 
 
 # ── Freepik Providers ─────────────────────────────────────────────────────────
@@ -162,7 +236,7 @@ class FreepikMysticProvider(ImageProvider):
       - "photo"       → Photorealistic, stock-quality output
       - "digital-art" → Illustrated / stylised / artistic output
 
-    aspect_ratio is translated to pixel dimensions via ASPECT_TO_PIXELS.
+    aspect_ratio is translated to Freepik's canonical string values.
     Returns public image URLs directly (Freepik hosts them).
     """
 
@@ -170,59 +244,90 @@ class FreepikMysticProvider(ImageProvider):
         self.style = style  # "photo" | "digital-art"
 
     async def generate(self, prompt: str, count: int = 4, aspect_ratio: str = "16:9") -> list[str]:
+        # ── Circuit breaker check ─────────────────────────────────────────────
+        if not freepik_breaker.allow_request():
+            raise RuntimeError(
+                "[FreepikMysticProvider] Circuit OPEN — Freepik is currently unavailable. "
+                "Please retry later."
+            )
+
         settings = get_settings()
         headers = {
             "x-freepik-api-key": settings.freepik_api_key,
             "Content-Type": "application/json",
         }
 
-        # Translate aspect ratio string -> Freepik exact string
+        # Translate aspect ratio string → Freepik canonical value
         aspect_map = {
             "16:9": "widescreen_16_9",
             "9:16": "social_story_9_16",
-            "1:1": "square_1_1",
-            "4:3": "classic_4_3",
-            "3:4": "traditional_3_4",
+            "1:1":  "square_1_1",
+            "4:3":  "classic_4_3",
+            "3:4":  "traditional_3_4",
         }
         freepik_aspect = aspect_map.get(aspect_ratio, "widescreen_16_9")
 
-        async with httpx.AsyncClient(timeout=90) as client:
-            # Step 1: Submit the job
-            submit = await client.post(
-                "https://api.freepik.com/v1/ai/mystic",
-                headers=headers,
-                json={
-                    "prompt": prompt,
-                    "aspect_ratio": freepik_aspect,
-                    "styling": {"style": self.style},
-                },
-            )
-            submit.raise_for_status()
-            task_id = submit.json()["data"]["task_id"]
-
-            # Step 2: Poll until COMPLETED (max 24 × 5s = 120s)
-            for _ in range(24):
-                await asyncio.sleep(5)
-                poll = await client.get(
-                    f"https://api.freepik.com/v1/ai/mystic/{task_id}",
-                    headers={"x-freepik-api-key": settings.freepik_api_key},
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                # Step 1: Submit the job
+                submit = await client.post(
+                    "https://api.freepik.com/v1/ai/mystic",
+                    headers=headers,
+                    json={
+                        "prompt": prompt,
+                        "aspect_ratio": freepik_aspect,
+                        "styling": {"style": self.style},
+                    },
                 )
-                poll.raise_for_status()
-                data = poll.json().get("data", {})
-                status = data.get("status")
+                submit.raise_for_status()
+                task_id = submit.json()["data"]["task_id"]
+                logger.info(f"[FreepikMysticProvider] Job submitted — task_id={task_id}")
 
-                if status == "COMPLETED":
-                    generated = data.get("generated", [])
-                    # generated is a list of URL strings e.g. ["https://cdn-magnific.freepik.com/..."]
-                    return [url for url in generated if isinstance(url, str) and url]
-                elif status in ("FAILED", "ERROR"):
-                    raise RuntimeError(
-                        f"Freepik Mystic generation failed: status={status}, task={task_id}"
+                # Step 2: Poll until COMPLETED (max 24 × ~6s = ~144s)
+                # Jitter avoids thundering-herd when multiple workers poll simultaneously
+                for poll_num in range(24):
+                    poll_wait = 5 + random.uniform(0, 2)  # 5–7s with jitter
+                    await asyncio.sleep(poll_wait)
+
+                    poll = await client.get(
+                        f"https://api.freepik.com/v1/ai/mystic/{task_id}",
+                        headers={"x-freepik-api-key": settings.freepik_api_key},
+                    )
+                    poll.raise_for_status()
+                    data = poll.json().get("data", {})
+                    status = data.get("status")
+
+                    logger.debug(
+                        f"[FreepikMysticProvider] task_id={task_id} poll={poll_num + 1} status={status}"
                     )
 
-        raise TimeoutError(
-            f"Freepik Mystic timed out after 120s (task={task_id})"
-        )
+                    if status == "COMPLETED":
+                        generated = data.get("generated", [])
+                        urls = [url for url in generated if isinstance(url, str) and url]
+                        if not urls:
+                            raise RuntimeError(
+                                f"[FreepikMysticProvider] Task {task_id} COMPLETED but returned no URLs"
+                            )
+                        freepik_breaker.record_success()
+                        logger.info(
+                            f"[FreepikMysticProvider] task_id={task_id} COMPLETED with {len(urls)} image(s)"
+                        )
+                        return urls
+
+                    elif status in _FREEPIK_FATAL_STATUSES:
+                        raise RuntimeError(
+                            f"[FreepikMysticProvider] Task failed: status={status}, task_id={task_id}"
+                        )
+                    # else: still in progress — keep polling
+
+            raise TimeoutError(
+                f"[FreepikMysticProvider] Timed out after 24 polls (task_id={task_id})"
+            )
+
+        except Exception as e:
+            freepik_breaker.record_failure()
+            logger.error(f"[FreepikMysticProvider] Error: {e}")
+            raise
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────

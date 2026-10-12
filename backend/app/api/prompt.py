@@ -1,6 +1,10 @@
+from __future__ import annotations
 from fastapi import APIRouter, HTTPException
+import time
 from app.core.database import get_supabase
 from app.core.config import get_settings
+from app.core.logging import logger
+from app.core.circuit_breaker import gemini_text_breaker
 from app.models.schemas import (
     RefinePromptRequest,
     RefinePromptResponse,
@@ -57,6 +61,9 @@ CRITICAL RULES:
 - Start immediately with "IMAGE_PROMPT:"
 """
 
+# Finish reasons that indicate the model will never produce output on this prompt
+_TERMINAL_FINISH_REASONS = {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII"}
+
 
 def _parse_dual_prompt(text: str) -> dict:
     """
@@ -94,6 +101,43 @@ def _parse_dual_prompt(text: str) -> dict:
     return sections
 
 
+def _extract_text_from_response(response) -> str | None:
+    """
+    Safely extract text from a Gemini GenerateContentResponse.
+
+    Returns the text string if the model produced output, or None if:
+    - The response has no candidates
+    - The candidate was blocked (safety / recitation)
+    - The candidate has no text parts
+    """
+    if not response.candidates:
+        logger.warning("[_extract_text] Response has no candidates")
+        return None
+
+    candidate = response.candidates[0]
+
+    # Check finish reason for terminal blocks (don't retry these)
+    finish_reason = str(getattr(candidate, "finish_reason", "") or "")
+    if finish_reason in _TERMINAL_FINISH_REASONS:
+        logger.warning(f"[_extract_text] Candidate blocked: finish_reason={finish_reason}")
+        return None  # Caller interprets None + terminal reason as "no point retrying"
+
+    # Extract text parts
+    if not (candidate.content and candidate.content.parts):
+        logger.warning("[_extract_text] Candidate has no content parts")
+        return None
+
+    text = "".join(
+        part.text for part in candidate.content.parts if getattr(part, "text", None)
+    ).strip()
+
+    if not text:
+        logger.warning("[_extract_text] Candidate parts contain no text")
+        return None
+
+    return text
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/gemini-models")
@@ -123,11 +167,7 @@ def refine_prompt(project_id: str, payload: RefinePromptRequest):
     raw_prompt = project["raw_prompt"]
     style_tags = project.get("style_tags") or []
 
-    # ── DEBUG: log exactly what we received from DB ───────────────────────────
-    print(f"\n[refine_prompt] project_id={project_id}")
-    print(f"[refine_prompt] raw_prompt from DB: {raw_prompt!r}")
-    print(f"[refine_prompt] style_tags: {style_tags}")
-    print(f"[refine_prompt] regenerate={payload.regenerate}, model={payload.gemini_model}")
+    logger.info(f"[refine_prompt] project_id={project_id}, regenerate={payload.regenerate}, model={payload.gemini_model}")
 
     # Build user message — always embed the full original text
     style_context = f"\nStyle preferences: {', '.join(style_tags)}." if style_tags else ""
@@ -145,43 +185,92 @@ def refine_prompt(project_id: str, payload: RefinePromptRequest):
     model_id = payload.gemini_model if payload.gemini_model in valid_ids else "gemini-3-flash-preview"
 
     parsed = {"image_prompt": "", "full_script": ""}
+    raw_output: str | None = None
 
     try:
+        # ── Circuit breaker check ─────────────────────────────────────────────
+        if not gemini_text_breaker.allow_request():
+            raise RuntimeError("Gemini text circuit is OPEN — skipping call")
+
         client = genai.Client(api_key=settings.gemini_api_key)
-        response = client.models.generate_content(
-            model=model_id,
-            contents=user_message,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.82,
-                max_output_tokens=600,
-            ),
-        )
-        raw_output = response.text.strip()
-        print(f"[refine_prompt] LLM raw output ({len(raw_output)} chars):\n{raw_output[:500]}")
+
+        # ── Retry loop: up to 3 attempts with exponential backoff ─────────────
+        max_attempts = 3
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=user_message,
+                    config=genai.types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.82,
+                        max_output_tokens=600,
+                    ),
+                )
+                text = _extract_text_from_response(response)
+
+                if text is not None:
+                    raw_output = text
+                    gemini_text_breaker.record_success()
+                    break  # ✅ success
+
+                # Check if this is a terminal block (no point retrying)
+                candidate = response.candidates[0] if response.candidates else None
+                finish_reason = str(getattr(candidate, "finish_reason", "") or "")
+                if finish_reason in _TERMINAL_FINISH_REASONS:
+                    logger.warning(f"[refine_prompt] Blocked by safety filter (finish_reason={finish_reason}). Using fallback.")
+                    gemini_text_breaker.record_failure()
+                    break  # don't waste attempts on a safety block
+
+                # Empty output but not terminal — retry
+                wait = min(2.0 * (2 ** (attempt - 1)), 16.0)
+                logger.warning(f"[refine_prompt] Attempt {attempt}/{max_attempts}: empty model output. Retrying in {wait:.1f}s...")
+                time.sleep(wait)
+
+            except Exception as e:
+                last_exc = e
+                error_str = str(e)
+                gemini_text_breaker.record_failure()
+
+                # Quota exhausted — no point retrying
+                if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str:
+                    logger.warning(f"[refine_prompt] Quota exhausted on attempt {attempt}. Falling back.")
+                    break
+
+                if attempt < max_attempts:
+                    wait = min(2.0 * (2 ** (attempt - 1)), 16.0)
+                    logger.warning(f"[refine_prompt] Attempt {attempt}/{max_attempts} error: {e}. Retrying in {wait:.1f}s...")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"[refine_prompt] All {max_attempts} attempts failed. Last error: {e}")
+                    raise  # propagate to outer except for fallback handling
+
+    except Exception as e:
+        logger.error(f"[refine_prompt] Gemini API error: {e}")
+        raw_output = None  # trigger fallback below
+
+    # ── Parse structured output or fall back gracefully ───────────────────────
+    if raw_output:
         parsed = _parse_dual_prompt(raw_output)
-        print(f"[refine_prompt] parsed image_prompt: {parsed['image_prompt'][:80]!r}")
-        print(f"[refine_prompt] parsed full_script (first 100): {parsed['full_script'][:100]!r}")
+        logger.debug(f"[refine_prompt] parsed image_prompt: {parsed['image_prompt'][:80]!r}")
 
         # If parse failed (missing sections), use full output as refined_prompt
         if not parsed["image_prompt"] and not parsed["full_script"]:
             parsed["full_script"] = raw_output
             parsed["image_prompt"] = raw_output[:300]  # truncate for image model
-
-    except Exception as e:
-        print(f"Gemini API error in refine_prompt: {e}")
-        # Graceful fallback — user is not blocked
+    else:
+        # Graceful fallback — user is not blocked, raw prompt is used directly
         style_suffix = f" {style_context}".strip()
         parsed["full_script"] = f"{raw_prompt}{style_suffix}"
         parsed["image_prompt"] = f"{raw_prompt}{style_suffix}"
+        logger.warning("[refine_prompt] Using raw prompt as fallback due to Gemini failure")
 
     # refined_prompt shown in Step 2 UI = full script
     refined_prompt = parsed["full_script"] or parsed["image_prompt"] or raw_prompt
 
     # Persist all three to DB
-    # image_prompt and motion_prompt columns must exist in the projects table.
-    # If they don't yet, the update will silently ignore them (Supabase/PostgREST
-    # ignores unknown columns in PATCH/UPDATE calls).
     db.table("projects").update(
         {
             "refined_prompt": refined_prompt,
