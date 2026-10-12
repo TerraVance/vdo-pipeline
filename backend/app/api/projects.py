@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from typing import List
+from typing import List, Optional
 from app.core.database import get_supabase
 from app.core.security import get_current_user_optional, get_current_user_required
 from app.models.schemas import (
@@ -8,13 +8,14 @@ from app.models.schemas import (
     ProjectStatusResponse,
     SelectImageRequest,
 )
+from app.core.logging import logger
 import uuid
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
-def create_project(payload: CreateProjectRequest, user_id: str = Depends(get_current_user_optional)):
+def create_project(payload: CreateProjectRequest, user_id: Optional[str] = Depends(get_current_user_optional)):
     """Stage 4.1 — Create a new project with a raw prompt and style tags."""
     db = get_supabase()
     data = {
@@ -27,8 +28,10 @@ def create_project(payload: CreateProjectRequest, user_id: str = Depends(get_cur
     }
     result = db.table("projects").insert(data).execute()
     if not result.data:
+        logger.error("Failed to insert project into database")
         raise HTTPException(status_code=500, detail="Failed to create project")
     row = result.data[0]
+    logger.info(f"Created project {row['id']} (user_id={user_id})")
     return _map_row(row)
 
 
@@ -45,7 +48,7 @@ def get_all_projects():
         )
         return [_map_row(row) for row in (result.data or [])]
     except Exception as e:
-        print(f"DB error in get_all_projects: {e}")
+        logger.error(f"DB error in get_all_projects: {e}")
         raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again.")
 
 
@@ -63,7 +66,7 @@ def get_user_projects(user_id: str = Depends(get_current_user_required)):
         )
         return [_map_row(row) for row in (result.data or [])]
     except Exception as e:
-        print(f"DB error in get_user_projects: {e}")
+        logger.error(f"DB error in get_user_projects: {e}")
         raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again.")
 
 
@@ -86,10 +89,11 @@ def delete_project(project_id: str, user_id: str = Depends(get_current_user_requ
         for f in files:
             db.storage.from_("media").remove([f"projects/{project_id}/images/{f['name']}"])
     except Exception as e:
-        print(f"Warning: Failed to cleanup storage for {project_id}: {e}")
+        logger.warning(f"Storage cleanup warning for project {project_id}: {e}")
 
     # 3. Delete from database
     db.table("projects").delete().eq("id", project_id).execute()
+    logger.info(f"Deleted project {project_id}")
     return None
 
 
@@ -128,7 +132,7 @@ def get_project_status(project_id: str):
     except HTTPException:
         raise  # re-raise 404s cleanly
     except Exception as e:
-        print(f"DB error in get_project_status: {e}")
+        logger.error(f"DB error in get_project_status: {e}")
         raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again.")
 
 

@@ -15,9 +15,8 @@ from functools import lru_cache
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# ── Supabase project constants ────────────────────────────────────────────────
-_SUPABASE_URL = "https://csklolgddgztfbftbunt.supabase.co"
-_JWKS_URL = f"{_SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+from app.core.config import get_settings
+from app.core.logging import logger
 
 # auto_error=False allows optional auth endpoints to handle missing tokens
 security = HTTPBearer(auto_error=False)
@@ -30,13 +29,18 @@ def _get_public_key() -> jwt.PyJWK:
     Result is cached for the lifetime of the process (lru_cache).
     Only called once on the first authenticated request.
     """
+    settings = get_settings()
+    supabase_url = settings.supabase_url.rstrip("/")
+    jwks_url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+
     try:
-        response = httpx.get(_JWKS_URL, timeout=10.0)
+        response = httpx.get(jwks_url, timeout=10.0)
         response.raise_for_status()
         jwks = response.json()
         # Supabase projects typically have one key
         return jwt.PyJWK(jwks["keys"][0])
     except Exception as e:
+        logger.error(f"Failed to fetch Supabase public key from JWKS ({jwks_url}): {e}")
         raise RuntimeError(f"Failed to fetch Supabase public key from JWKS: {e}")
 
 
@@ -57,11 +61,13 @@ def _verify_token(token: str) -> Optional[str]:
         )
         return payload.get("sub")  # sub = user UUID in Supabase JWTs
     except jwt.ExpiredSignatureError:
+        logger.debug("Supabase JWT has expired")
         return None
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid Supabase JWT token: {e}")
         return None
     except Exception as e:
-        print(f"JWT verification error: {e}")
+        logger.error(f"JWT verification error: {e}")
         return None
 
 

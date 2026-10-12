@@ -1,0 +1,81 @@
+version: "3.8"
+
+services:
+  # ── 1. Redis Broker for Celery ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: vdo-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── 2. FastAPI Backend API Server ───────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vdo-backend
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - FREEPIK_API_KEY=${FREEPIK_API_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - PORT=8000
+    ports:
+      - "8001:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── 3. Celery Async Task Worker ─────────────────────────────────────────────
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vdo-celery-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - FREEPIK_API_KEY=${FREEPIK_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── 4. Next.js Frontend ─────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+        - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+        - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+    container_name: vdo-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  redis_data:

@@ -1,0 +1,69 @@
+services:
+  # ── 1. FastAPI Web Service ──────────────────────────────────────────────────
+  - type: web
+    name: vdo-backend-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: vdo-redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FREEPIK_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # ── 2. Celery Background Worker ─────────────────────────────────────────────
+  - type: worker
+    name: vdo-celery-worker
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A app.core.celery_app worker --loglevel=info --concurrency=4
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: vdo-redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FREEPIK_API_KEY
+        sync: false
+
+  # ── 3. Managed Redis ────────────────────────────────────────────────────────
+  - type: redis
+    name: vdo-redis
+    ipAllowList: [] # internal network only
+    plan: starter

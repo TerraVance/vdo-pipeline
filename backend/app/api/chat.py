@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from typing import List
+from typing import List, Optional
 from app.core.database import get_supabase
 from app.core.security import get_current_user_optional, get_current_user_required
 from app.models.schemas import (
@@ -15,6 +15,7 @@ import uuid
 import datetime
 from google import genai
 from app.core.config import get_settings
+from app.core.logging import logger
 from app.workers.image_tasks import generate_message_images_task
 
 SYSTEM_PROMPT_CHAT = """\
@@ -32,7 +33,7 @@ CRITICAL INSTRUCTIONS:
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
 @router.post("/sessions", response_model=SessionResponse, status_code=201)
-def create_session(payload: CreateSessionRequest, user_id: str = Depends(get_current_user_optional)):
+def create_session(payload: CreateSessionRequest, user_id: Optional[str] = Depends(get_current_user_optional)):
     db = get_supabase()
     data = {
         "id": str(uuid.uuid4()),
@@ -41,24 +42,27 @@ def create_session(payload: CreateSessionRequest, user_id: str = Depends(get_cur
     }
     result = db.table("sessions").insert(data).execute()
     if not result.data:
+        logger.error("Failed to insert session row in database")
         raise HTTPException(status_code=500, detail="Failed to create session")
+    logger.info(f"Created chat session id={data['id']} (user_id={user_id})")
     return result.data[0]
 
 
 @router.get("/sessions", response_model=List[SessionResponse])
-def get_user_sessions(user_id: str = Depends(get_current_user_required)):
+def get_user_sessions(user_id: Optional[str] = Depends(get_current_user_optional)):
+    """Retrieve chat sessions. If authenticated, returns user sessions; otherwise returns recent guest sessions."""
     db = get_supabase()
     try:
-        result = (
-            db.table("sessions")
-            .select("*")
-            .eq("user_id", user_id)
-            .order("updated_at", desc=True)
-            .execute()
-        )
+        query = db.table("sessions").select("*")
+        if user_id:
+            query = query.eq("user_id", user_id)
+        else:
+            query = query.is_("user_id", "null")
+            
+        result = query.order("updated_at", desc=True).limit(50).execute()
         return result.data or []
     except Exception as e:
-        print(f"DB error in get_user_sessions: {e}")
+        logger.error(f"DB error in get_user_sessions: {e}")
         raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
 
 
@@ -85,8 +89,9 @@ def _cleanup_message_storage(db, messages: List[dict]):
             try:
                 from app.core.celery_app import celery_app
                 celery_app.control.revoke(task_id, terminate=True)
-            except Exception:
-                pass
+                logger.info(f"Revoked Celery task {task_id} for message {msg_id}")
+            except Exception as e:
+                logger.warning(f"Could not revoke Celery task {task_id}: {e}")
 
         # 1. List files in storage under messages/{msg_id}/images
         folder = f"messages/{msg_id}/images"
@@ -97,7 +102,7 @@ def _cleanup_message_storage(db, messages: List[dict]):
                 if name and name != ".emptyFolderPlaceholder":
                     files_to_remove.add(f"{folder}/{name}")
         except Exception as e:
-            print(f"Warning listing storage in {folder}: {e}")
+            logger.warning(f"Storage listing warning in {folder}: {e}")
 
         # 2. Extract paths from image_urls
         for url in (msg.get("image_urls") or []):
@@ -107,12 +112,12 @@ def _cleanup_message_storage(db, messages: List[dict]):
 
     if files_to_remove:
         file_list = list(files_to_remove)
-        print(f"Cleaning up {len(file_list)} files from storage: {file_list}")
+        logger.info(f"Purging {len(file_list)} media artifacts from Supabase storage")
         for i in range(0, len(file_list), 50):
             try:
                 db.storage.from_("media").remove(file_list[i : i + 50])
             except Exception as e:
-                print(f"Warning removing storage files: {e}")
+                logger.warning(f"Storage removal warning: {e}")
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
@@ -128,16 +133,17 @@ def delete_session(session_id: str):
         if messages_res.data:
             _cleanup_message_storage(db, messages_res.data)
     except Exception as e:
-        print(f"Warning cleaning storage for session {session_id}: {e}")
+        logger.warning(f"Storage cleanup warning for session {session_id}: {e}")
 
     # 2. Delete messages from database table
     try:
         db.table("messages").delete().eq("session_id", session_id).execute()
     except Exception as e:
-        print(f"Warning deleting messages for session {session_id}: {e}")
+        logger.warning(f"Message records cleanup warning for session {session_id}: {e}")
 
     # 3. Delete session from database table
     db.table("sessions").delete().eq("id", session_id).execute()
+    logger.info(f"Successfully deleted chat session {session_id}")
 
 
 @router.delete("/sessions/{session_id}/messages/{message_id}", status_code=204)
@@ -266,12 +272,15 @@ def send_message(session_id: str, payload: SendMessageRequest):
             response = chat.send_message(payload.content)
             assistant_msg["content"] = response.text
             assistant_msg["status"] = MessageStatus.COMPLETED.value
+            logger.info(f"Generated prompt refinement for session {session_id}")
         except Exception as e:
+            logger.exception(f"Error generating prompt refinement in session {session_id}: {e}")
             assistant_msg["content"] = f"Error generating prompt: {e}"
             assistant_msg["status"] = MessageStatus.FAILED.value
             
         result = db.table("messages").insert(assistant_msg).execute()
         if not result.data:
+            logger.error(f"Failed to create assistant message in session {session_id}")
             raise HTTPException(status_code=500, detail="Failed to create assistant message")
         return result.data[0]
 

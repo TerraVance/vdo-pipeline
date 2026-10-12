@@ -21,6 +21,5 @@ COPY . .
 EXPOSE 8000
 
 # ── Default: run the FastAPI server ──────────────────────────────────
-# To run the Celery worker instead, override CMD in Render:
-#   CMD ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=info"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Uses $PORT if provided by the cloud provider (Render, Railway, Cloud Run), otherwise defaults to 8000
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

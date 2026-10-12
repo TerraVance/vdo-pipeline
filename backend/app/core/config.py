@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Find it in: Supabase Dashboard → Settings → API → JWT Secret
     supabase_jwt_secret: str = ""
 
+    # CORS
+    allowed_origins: str = ""   # Optional comma-separated list of extra origins (e.g. "https://mycustomdomain.com")
+
     class Config:
         env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
