@@ -13,7 +13,8 @@ import {
   Copy, 
   Check, 
   Download, 
-  AlertCircle 
+  AlertCircle,
+  ArrowLeft 
 } from "lucide-react";
 
 export interface ChatSession {
@@ -155,6 +156,19 @@ export default function StudioPage() {
       setModel("gemini_imagen3");
     }
   }, [action]);
+
+  // Close image preview on Escape key to return to chat
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSelectedImage(null);
+      }
+    };
+    if (selectedImage) {
+      window.addEventListener("keydown", handleKeyDown);
+    }
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedImage]);
 
   const deleteSession = async (e: React.MouseEvent, sessionId: string) => {
     e.preventDefault();
@@ -475,31 +489,80 @@ export default function StudioPage() {
         
       </div>
 
-      {/* ── Image Lightbox Modal ── */}
+      {/* ── Image Lightbox Modal with Back to Chat & Exit controls ── */}
       {selectedImage && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+          className="fixed inset-0 z-[100] flex flex-col items-center justify-between bg-black/95 backdrop-blur-md p-4 sm:p-6 animate-in fade-in duration-200"
           onClick={() => setSelectedImage(null)}
           role="dialog"
           aria-modal="true"
         >
-          <div className="relative max-w-[90vw] max-h-[90vh] flex items-center justify-center">
+          {/* Top Control Bar */}
+          <div 
+            className="w-full max-w-6xl flex items-center justify-between py-2 z-10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Primary 'Back to Chat' Action Button */}
             <button 
-              className="absolute -top-12 right-0 text-white/70 hover:text-white p-2 rounded-full hover:bg-white/10 transition-colors cursor-pointer"
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelectedImage(null);
-              }}
-              aria-label="Close image lightbox"
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white font-medium text-sm border border-white/15 backdrop-blur-md transition-all shadow-lg hover:scale-105 active:scale-95 cursor-pointer"
+              onClick={() => setSelectedImage(null)}
+              title="Return to chat section (Esc)"
             >
-              <X className="w-6 h-6" />
+              <ArrowLeft className="w-4 h-4 text-primary" />
+              <span>Back to Chat</span>
             </button>
+
+            {/* Actions: Download & Exit */}
+            <div className="flex items-center gap-2">
+              <a
+                href={selectedImage}
+                target="_blank"
+                rel="noopener noreferrer"
+                download="generated_image.png"
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white/90 hover:text-white text-sm border border-white/15 backdrop-blur-md transition-all shadow-lg cursor-pointer"
+                title="Download image"
+              >
+                <Download className="w-4 h-4" />
+                <span className="hidden sm:inline">Download</span>
+              </a>
+
+              <button 
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-red-500/20 text-white/90 hover:text-red-300 text-sm border border-white/15 hover:border-red-500/30 backdrop-blur-md transition-all shadow-lg cursor-pointer"
+                onClick={() => setSelectedImage(null)}
+                title="Exit from image (Esc)"
+                aria-label="Exit expanded image view"
+              >
+                <X className="w-4 h-4" />
+                <span>Exit</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Expanded Image Container */}
+          <div 
+            className="relative flex-1 w-full max-w-6xl flex items-center justify-center my-3 overflow-hidden cursor-zoom-out"
+            onClick={() => setSelectedImage(null)}
+          >
             <img 
               src={selectedImage} 
               alt="Generated full size" 
-              className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl border border-white/10"
+              className="max-w-full max-h-[76vh] object-contain rounded-xl shadow-2xl border border-white/10 cursor-default"
               onClick={(e) => e.stopPropagation()}
             />
+          </div>
+
+          {/* Bottom Navigation Helper */}
+          <div 
+            className="w-full flex items-center justify-center pt-1 pb-1 z-10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button 
+              className="flex items-center gap-2 px-5 py-2 rounded-full bg-black/80 hover:bg-black text-white/80 hover:text-white text-xs sm:text-sm font-medium border border-white/15 hover:border-white/30 backdrop-blur-xl shadow-2xl transition-all hover:scale-105 active:scale-95 cursor-pointer"
+              onClick={() => setSelectedImage(null)}
+            >
+              <ArrowLeft className="w-3.5 h-3.5 text-primary" />
+              <span>Back to Chat &bull; Click anywhere outside or press Esc</span>
+            </button>
           </div>
         </div>
       )}
